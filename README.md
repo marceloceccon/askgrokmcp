@@ -19,7 +19,19 @@ Ask Grok questions and generate images with Aurora -- directly from your termina
 
 ## Setup
 
-### 1. Clone and install
+### Option A: Install from npm
+
+```bash
+npm install -g askgrokmcp
+```
+
+Then register with Claude Code:
+
+```bash
+claude mcp add grok -e XAI_API_KEY=your_api_key_here -- grok-mcp
+```
+
+### Option B: Clone from source
 
 ```bash
 git clone https://github.com/marceloceccon/askgrokmcp.git
@@ -27,15 +39,17 @@ cd askgrokmcp
 npm install
 ```
 
-### 2. Register the MCP server with Claude Code
+Then register with Claude Code:
 
 ```bash
 claude mcp add grok -e XAI_API_KEY=your_api_key_here -- node /path/to/askgrokmcp/grok-mcp.mjs
 ```
 
-Replace `/path/to/askgrokmcp` with the actual path where you cloned the repository, and `your_api_key_here` with your xAI API key.
+Replace `/path/to/askgrokmcp` with the actual path where you cloned the repository.
 
-That's it. The tools are now available in Claude Code.
+---
+
+Replace `your_api_key_here` with your xAI API key in either option. That's it -- the tools are now available in Claude Code.
 
 ## Usage
 

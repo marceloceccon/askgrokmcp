@@ -6,10 +6,25 @@
   "author": "Marcelo Ceccon",
   "type": "module",
   "main": "grok-mcp.mjs",
+  "bin": {
+    "grok-mcp": "./grok-mcp.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "grok",
+    "xai",
+    "claude",
+    "claude-code",
+    "ai",
+    "model-context-protocol"
+  ],
   "scripts": {
     "start": "node grok-mcp.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }

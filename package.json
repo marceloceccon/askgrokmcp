@@ -4,10 +4,14 @@
   "description": "MCP server that exposes xAI's Grok API as tools for Claude Code",
   "license": "MIT",
   "author": "Marcelo Ceccon",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marceloceccon/askgrokmcp.git"
+  },
   "type": "module",
   "main": "grok-mcp.mjs",
   "bin": {
-    "grok-mcp": "./grok-mcp.mjs"
+    "grok-mcp": "grok-mcp.mjs"
   },
   "keywords": [
     "mcp",

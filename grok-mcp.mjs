@@ -13,8 +13,8 @@
  * @see https://docs.x.ai/api
  */
 
-import { writeFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { writeFile, mkdir } from "node:fs/promises";
+import { resolve, relative, dirname, isAbsolute } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -66,7 +66,7 @@ const tools = [
         file_path: {
           type: "string",
           description:
-            "Absolute path where the image file should be saved (e.g. /tmp/background-001.png)",
+            "Path where the image file should be saved. Relative paths resolve from cwd; absolute paths must be within SAFE_WRITE_BASE_DIR (or cwd if unset). Example: images/output.png",
         },
         n: {
           type: "number",
@@ -79,6 +79,37 @@ const tools = [
 ];
 
 // -- Helpers -----------------------------------------------------------------
+
+/**
+ * Writes data to a file, enforcing that the destination is inside the
+ * allowed base directory. Creates parent directories as needed.
+ *
+ * Base dir precedence:
+ *   1. SAFE_WRITE_BASE_DIR env var (must be an absolute path)
+ *   2. process.cwd() as the default fallback
+ *
+ * @param {string} dest - Resolved absolute destination path.
+ * @param {Buffer|string} data - File contents to write.
+ * @throws {Error} If dest resolves outside the allowed base.
+ */
+async function safeWrite(dest, data) {
+  const base = process.env.SAFE_WRITE_BASE_DIR
+    ? resolve(process.env.SAFE_WRITE_BASE_DIR)
+    : process.cwd();
+
+  const rel = relative(base, dest);
+
+  // Starts with ".." → outside base; isAbsolute guards cross-drive (Windows)
+  if (rel.startsWith("..") || isAbsolute(rel)) {
+    throw new Error(
+      `Path "${dest}" is outside the allowed write directory "${base}". ` +
+        `Set SAFE_WRITE_BASE_DIR to allow writes elsewhere.`,
+    );
+  }
+
+  await mkdir(dirname(dest), { recursive: true });
+  await writeFile(dest, data);
+}
 
 /**
  * Makes an authenticated request to the xAI API.
@@ -174,7 +205,7 @@ async function handleGenerateImage(args) {
   for (let i = 0; i < data.data.length; i++) {
     const buffer = await downloadBuffer(data.data[i].url);
     const dest = buildFilePath(args.file_path, i, data.data.length);
-    await writeFile(dest, buffer);
+    await safeWrite(dest, buffer);
     saved.push(dest);
   }
 

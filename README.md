@@ -64,18 +64,44 @@ Once registered, you can use the tools naturally in Claude Code:
 ### Generate an image
 
 ```
-> ask grok to generate an image of a sunset over mountains
+> ask grok to generate an image of a sunset over mountains and save it as images/sunset.png
 ```
 
 ### Generate multiple variations
 
 ```
-> ask grok to generate 4 variations of a logo for a coffee shop and save them to /tmp/logo.png
+> ask grok to generate 4 variations of a logo for a coffee shop and save them as images/logo.png
 ```
 
 When generating multiple images, files are automatically numbered (e.g., `logo-1.png`, `logo-2.png`, ...).
 
+## File write safety
+
+By default the server only writes images inside the **current working directory** (the directory Claude Code was launched from) and its subdirectories. Any path that resolves outside that directory is rejected with a clear error.
+
+To allow writes to a different location, set the `SAFE_WRITE_BASE_DIR` environment variable to an absolute path:
+
+```bash
+export SAFE_WRITE_BASE_DIR=/tmp/my-images
+```
+
+Or pass it directly when registering the server:
+
+```bash
+claude mcp add grok \
+  -e XAI_API_KEY=your_api_key_here \
+  -e SAFE_WRITE_BASE_DIR=/tmp/my-images \
+  -- grok-mcp
+```
+
+> **Note:** Absolute paths that resolve outside the allowed base directory are rejected. Use relative paths (e.g. `images/output.png`) or set `SAFE_WRITE_BASE_DIR` explicitly.
+
 ## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `XAI_API_KEY` | *(required)* | Your xAI API key |
+| `SAFE_WRITE_BASE_DIR` | `process.cwd()` | Base directory for image writes |
 
 The server uses these xAI models by default:
 

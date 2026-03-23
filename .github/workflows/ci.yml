@@ -23,4 +23,4 @@ jobs:
       - run: npm ci
 
       - name: Verify the server script parses correctly
-        run: node --check grok-mcp.mjs
+        run: npm run check

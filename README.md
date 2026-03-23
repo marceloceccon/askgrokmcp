@@ -102,6 +102,11 @@ claude mcp add grok \
 |----------|---------|-------------|
 | `XAI_API_KEY` | *(required)* | Your xAI API key |
 | `SAFE_WRITE_BASE_DIR` | `process.cwd()` | Base directory for image writes |
+| `XAI_REQUEST_TIMEOUT_MS` | `30000` | Timeout per xAI API request in milliseconds |
+| `XAI_MAX_RETRIES` | `2` | Number of retries for transient errors (429/5xx/network/timeout) |
+| `XAI_RETRY_BASE_DELAY_MS` | `500` | Base delay for exponential retry backoff |
+| `LOG_REQUESTS` | `false` | Logs tool/xAI request metadata to stderr |
+| `LOG_REQUEST_PAYLOADS` | `false` | Includes full request payloads in logs (use carefully) |
 
 The server uses these xAI models by default:
 
@@ -111,6 +116,25 @@ The server uses these xAI models by default:
 | Image generation | `grok-imagine-image` |
 
 To change models, edit the constants at the top of `grok-mcp.mjs`.
+
+## Request logging
+
+Request logging is optional and disabled by default.
+
+Enable metadata-only logs:
+
+```bash
+export LOG_REQUESTS=true
+```
+
+To also log full request payloads (including prompts), explicitly enable:
+
+```bash
+export LOG_REQUESTS=true
+export LOG_REQUEST_PAYLOADS=true
+```
+
+> **Important:** Logs are written to stderr (not stdout) so MCP protocol communication remains safe.
 
 ## How it works
 

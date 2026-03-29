@@ -4,10 +4,16 @@
  * Grok MCP Server
  *
  * A Model Context Protocol (MCP) server that exposes xAI's Grok API
- * as tools for AI assistants like Claude Code. Provides two capabilities:
+ * as tools for AI assistants like Claude Code. Provides three capabilities:
  *
- * - ask_grok: Send prompts to Grok and receive text responses.
+ * - ask_grok:      Send prompts to Grok and receive text responses.
  * - generate_image: Generate images using Grok's Aurora model and save them locally.
+ * - list_models:   List all models available to your xAI account.
+ *
+ * Model selection (highest priority wins):
+ *   1. Per-call `model` argument
+ *   2. GROK_CHAT_MODEL / GROK_IMAGE_MODEL environment variables
+ *   3. Built-in defaults (grok-3-fast / grok-2-image)
  *
  * @see https://modelcontextprotocol.io
  * @see https://docs.x.ai/api
@@ -25,15 +31,22 @@ import {
 // -- Configuration -----------------------------------------------------------
 
 const XAI_API_BASE = "https://api.x.ai/v1";
-const CHAT_MODEL = "grok-3-fast";
-const IMAGE_MODEL = "grok-imagine-image";
-const MAX_IMAGE_VARIATIONS = 10;
-const REQUEST_TIMEOUT_MS = parsePositiveIntEnv("XAI_REQUEST_TIMEOUT_MS", 30_000);
-const MAX_RETRIES = parseNonNegativeIntEnv("XAI_MAX_RETRIES", 2);
-const RETRY_BASE_DELAY_MS = parsePositiveIntEnv("XAI_RETRY_BASE_DELAY_MS", 500);
-const LOG_REQUESTS = parseBooleanEnv("LOG_REQUESTS", false);
-const LOG_REQUEST_PAYLOADS = parseBooleanEnv("LOG_REQUEST_PAYLOADS", false);
-const SERVER_VERSION = "1.2.0.0";
+
+/** Default models — overridable via env vars or per-call argument. */
+const DEFAULT_CHAT_MODEL  = "grok-3-fast";
+const DEFAULT_IMAGE_MODEL = "grok-2-image";
+
+/** Active defaults (env vars take precedence over built-ins). */
+const CHAT_MODEL  = process.env.GROK_CHAT_MODEL  ?? DEFAULT_CHAT_MODEL;
+const IMAGE_MODEL = process.env.GROK_IMAGE_MODEL ?? DEFAULT_IMAGE_MODEL;
+
+const MAX_IMAGE_VARIATIONS  = 10;
+const REQUEST_TIMEOUT_MS    = parsePositiveIntEnv("XAI_REQUEST_TIMEOUT_MS",  30_000);
+const MAX_RETRIES           = parseNonNegativeIntEnv("XAI_MAX_RETRIES",          2);
+const RETRY_BASE_DELAY_MS   = parsePositiveIntEnv("XAI_RETRY_BASE_DELAY_MS",   500);
+const LOG_REQUESTS          = parseBooleanEnv("LOG_REQUESTS",          false);
+const LOG_REQUEST_PAYLOADS  = parseBooleanEnv("LOG_REQUEST_PAYLOADS",  false);
+const SERVER_VERSION        = "1.3.0";
 
 const SAFE_WRITE_BASE_DIR = process.env.SAFE_WRITE_BASE_DIR;
 if (SAFE_WRITE_BASE_DIR && !isAbsolute(SAFE_WRITE_BASE_DIR)) {
@@ -53,13 +66,23 @@ if (!API_KEY) {
 const tools = [
   {
     name: "ask_grok",
-    description: "Ask Grok a question and get a response",
+    description:
+      "Ask Grok a question and get a response. " +
+      `Default model: ${CHAT_MODEL}. ` +
+      "Use the optional 'model' parameter to use a different chat model. " +
+      "Run list_models to see all available options.",
     inputSchema: {
       type: "object",
       properties: {
         prompt: {
           type: "string",
           description: "The question or prompt to send to Grok",
+        },
+        model: {
+          type: "string",
+          description:
+            `Chat model to use for this request. Defaults to "${CHAT_MODEL}". ` +
+            "Use list_models to see available chat models.",
         },
       },
       required: ["prompt"],
@@ -68,7 +91,9 @@ const tools = [
   {
     name: "generate_image",
     description:
-      "Generate an image using Grok's Aurora image model and save it to a local file",
+      "Generate an image using Grok's Aurora image model and save it to a local file. " +
+      `Default model: ${IMAGE_MODEL}. ` +
+      "Use the optional 'model' parameter to use a different image model.",
     inputSchema: {
       type: "object",
       properties: {
@@ -79,14 +104,43 @@ const tools = [
         file_path: {
           type: "string",
           description:
-            "Path where the image file should be saved. Relative paths resolve from cwd; absolute paths must be within SAFE_WRITE_BASE_DIR (or cwd if unset). Example: images/output.png",
+            "Path where the image file should be saved. Relative paths resolve from cwd; " +
+            "absolute paths must be within SAFE_WRITE_BASE_DIR (or cwd if unset). Example: images/output.png",
         },
         n: {
           type: "number",
           description: "Number of image variations to generate (1-10, default 1)",
         },
+        model: {
+          type: "string",
+          description:
+            `Image model to use for this request. Defaults to "${IMAGE_MODEL}". ` +
+            "Use list_models to see available image models.",
+        },
       },
       required: ["prompt", "file_path"],
+    },
+  },
+  {
+    name: "list_models",
+    description:
+      "List all xAI models available to your account, including their IDs and capabilities. " +
+      "Use this to discover which models you can pass to ask_grok or generate_image. " +
+      "You can also filter by type: 'chat' for language models or 'image' for image generation.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        filter: {
+          type: "string",
+          enum: ["all", "chat", "image"],
+          description:
+            "Filter models by capability. " +
+            "'chat' returns language/reasoning models, " +
+            "'image' returns image generation models, " +
+            "'all' returns everything (default).",
+        },
+      },
+      required: [],
     },
   },
 ];
@@ -121,14 +175,37 @@ async function safeWrite(dest, data) {
 }
 
 /**
- * Makes an authenticated request to the xAI API.
+ * Makes an authenticated POST request to the xAI API with retries.
  *
  * @param {string} endpoint - API path relative to the base URL (e.g. "/chat/completions").
  * @param {object} body     - JSON-serializable request body.
  * @returns {Promise<object>} Parsed JSON response.
- * @throws {Error} On non-2xx responses, includes status code and error body.
+ * @throws {Error} On non-2xx responses after retries.
  */
-async function xaiRequest(endpoint, body) {
+async function xaiPost(endpoint, body) {
+  return xaiRequest("POST", endpoint, body);
+}
+
+/**
+ * Makes an authenticated GET request to the xAI API.
+ *
+ * @param {string} endpoint - API path relative to the base URL (e.g. "/models").
+ * @returns {Promise<object>} Parsed JSON response.
+ * @throws {Error} On non-2xx responses.
+ */
+async function xaiGet(endpoint) {
+  return xaiRequest("GET", endpoint, null);
+}
+
+/**
+ * Core HTTP request handler for the xAI API with retry logic.
+ *
+ * @param {"GET"|"POST"} method - HTTP method.
+ * @param {string} endpoint     - API path relative to the base URL.
+ * @param {object|null} body    - JSON body (POST only; null for GET).
+ * @returns {Promise<object>} Parsed JSON response.
+ */
+async function xaiRequest(method, endpoint, body) {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -137,6 +214,7 @@ async function xaiRequest(endpoint, body) {
     try {
       if (LOG_REQUESTS) {
         logEvent("xai_request", {
+          method,
           endpoint,
           attempt: attempt + 1,
           max_attempts: MAX_RETRIES + 1,
@@ -145,16 +223,19 @@ async function xaiRequest(endpoint, body) {
         });
       }
 
-      const res = await fetch(`${XAI_API_BASE}${endpoint}`, {
-        method: "POST",
+      const fetchOptions = {
+        method,
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${API_KEY}`,
         },
-        body: JSON.stringify(body),
         signal: controller.signal,
-      });
+      };
+      if (body !== null) {
+        fetchOptions.body = JSON.stringify(body);
+      }
 
+      const res = await fetch(`${XAI_API_BASE}${endpoint}`, fetchOptions);
       const elapsedMs = Date.now() - startedAt;
 
       if (!res.ok) {
@@ -162,6 +243,7 @@ async function xaiRequest(endpoint, body) {
         const retriable = isRetriableStatus(res.status);
         if (LOG_REQUESTS) {
           logEvent("xai_error", {
+            method,
             endpoint,
             status: res.status,
             retriable,
@@ -185,6 +267,7 @@ async function xaiRequest(endpoint, body) {
 
       if (LOG_REQUESTS) {
         logEvent("xai_success", {
+          method,
           endpoint,
           attempt: attempt + 1,
           duration_ms: elapsedMs,
@@ -199,6 +282,7 @@ async function xaiRequest(endpoint, body) {
 
       if (LOG_REQUESTS) {
         logEvent("xai_exception", {
+          method,
           endpoint,
           attempt: attempt + 1,
           duration_ms: elapsedMs,
@@ -268,14 +352,19 @@ function buildFilePath(basePath, index, total) {
 
 /**
  * Sends a prompt to Grok's chat completion endpoint and returns the response.
+ * Honors the optional per-call `model` argument.
  */
 async function handleAskGrok(args) {
   if (!args || typeof args.prompt !== "string" || !args.prompt.trim()) {
     throw new Error("Invalid arguments: 'prompt' must be a non-empty string");
   }
 
-  const data = await xaiRequest("/chat/completions", {
-    model: CHAT_MODEL,
+  const model = (typeof args.model === "string" && args.model.trim())
+    ? args.model.trim()
+    : CHAT_MODEL;
+
+  const data = await xaiPost("/chat/completions", {
+    model,
     messages: [{ role: "user", content: args.prompt }],
   });
 
@@ -291,6 +380,7 @@ async function handleAskGrok(args) {
 
 /**
  * Generates images via Grok's Aurora model, downloads them, and saves to disk.
+ * Honors the optional per-call `model` argument.
  */
 async function handleGenerateImage(args) {
   if (!args || typeof args.prompt !== "string" || !args.prompt.trim()) {
@@ -304,9 +394,12 @@ async function handleGenerateImage(args) {
   }
 
   const n = Math.min(Math.max(args.n ?? 1, 1), MAX_IMAGE_VARIATIONS);
+  const model = (typeof args.model === "string" && args.model.trim())
+    ? args.model.trim()
+    : IMAGE_MODEL;
 
-  const data = await xaiRequest("/images/generations", {
-    model: IMAGE_MODEL,
+  const data = await xaiPost("/images/generations", {
+    model,
     prompt: args.prompt,
     n,
   });
@@ -339,9 +432,80 @@ async function handleGenerateImage(args) {
   };
 }
 
+/**
+ * Fetches available models from the xAI API and formats them for display.
+ * Supports optional filtering by capability (chat or image).
+ */
+async function handleListModels(args) {
+  const filter = args?.filter ?? "all";
+  if (!["all", "chat", "image"].includes(filter)) {
+    throw new Error("Invalid arguments: 'filter' must be 'all', 'chat', or 'image'");
+  }
+
+  const data = await xaiGet("/models");
+  const models = Array.isArray(data?.data) ? data.data : [];
+
+  if (models.length === 0) {
+    return { content: [{ type: "text", text: "No models returned by the xAI API." }] };
+  }
+
+  // xAI model IDs contain hints about their capability:
+  // image generation models have "image" or "imagine" in the ID.
+  const isImageModel = (id) =>
+    /image|imagine|aurora/i.test(id);
+
+  const filtered = models.filter((m) => {
+    if (filter === "all") return true;
+    const isImg = isImageModel(m.id ?? "");
+    return filter === "image" ? isImg : !isImg;
+  });
+
+  if (filtered.length === 0) {
+    return {
+      content: [{
+        type: "text",
+        text: `No ${filter} models found. Try filter: "all" to see everything.`,
+      }],
+    };
+  }
+
+  // Sort: alphabetically, images last
+  filtered.sort((a, b) => {
+    const aImg = isImageModel(a.id ?? "");
+    const bImg = isImageModel(b.id ?? "");
+    if (aImg !== bImg) return aImg ? 1 : -1;
+    return (a.id ?? "").localeCompare(b.id ?? "");
+  });
+
+  const lines = [
+    `${filtered.length} model(s) available${filter !== "all" ? ` (filter: ${filter})` : ""}:`,
+    "",
+  ];
+
+  for (const m of filtered) {
+    const id = m.id ?? "unknown";
+    const type = isImageModel(id) ? "image" : "chat";
+    const isDefaultChat  = id === CHAT_MODEL;
+    const isDefaultImage = id === IMAGE_MODEL;
+    const defaultTag = isDefaultChat
+      ? " ← current default (chat)"
+      : isDefaultImage
+        ? " ← current default (image)"
+        : "";
+    lines.push(`  ${id}  [${type}]${defaultTag}`);
+  }
+
+  lines.push("");
+  lines.push(`To change the default: set GROK_CHAT_MODEL or GROK_IMAGE_MODEL env vars.`);
+  lines.push(`To use once: pass model="<id>" to ask_grok or generate_image.`);
+
+  return { content: [{ type: "text", text: lines.join("\n") }] };
+}
+
 const toolHandlers = {
-  ask_grok: handleAskGrok,
+  ask_grok:       handleAskGrok,
   generate_image: handleGenerateImage,
+  list_models:    handleListModels,
 };
 
 // -- Server setup ------------------------------------------------------------
@@ -393,6 +557,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 const transport = new StdioServerTransport();
 await server.connect(transport);
 
+// -- Utility functions -------------------------------------------------------
+
 function parseBooleanEnv(name, defaultValue) {
   const raw = process.env[name];
   if (raw == null) return defaultValue;
@@ -439,7 +605,7 @@ function isNetworkError(error) {
 }
 
 function backoffDelay(attempt) {
-  // Exponential backoff: base, 2*base, 4*base...
+  // Exponential backoff: base, 2×base, 4×base, …
   return RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
 }
 

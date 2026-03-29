@@ -2,7 +2,7 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that brings xAI's Grok API into [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as native tools.
 
-Ask Grok questions and generate images with Aurora -- directly from your terminal.
+Ask Grok questions, generate images with Aurora, and explore available models — directly from your terminal.
 
 ## Tools
 
@@ -10,6 +10,7 @@ Ask Grok questions and generate images with Aurora -- directly from your termina
 |------|-------------|
 | `ask_grok` | Send a prompt to Grok and get a text response |
 | `generate_image` | Generate images using Grok's Aurora model and save them locally |
+| `list_models` | List all xAI models available to your account |
 
 ## Prerequisites
 
@@ -61,6 +62,12 @@ Once registered, you can use the tools naturally in Claude Code:
 > ask grok what the latest news in AI are
 ```
 
+### Use a specific model for one call
+
+```
+> ask grok to summarize this document using grok-3
+```
+
 ### Generate an image
 
 ```
@@ -74,6 +81,51 @@ Once registered, you can use the tools naturally in Claude Code:
 ```
 
 When generating multiple images, files are automatically numbered (e.g., `logo-1.png`, `logo-2.png`, ...).
+
+### List available models
+
+```
+> list the available grok models
+> list grok chat models only
+> list grok image models
+```
+
+## Model Selection
+
+The server uses a three-level priority system for model selection:
+
+| Priority | Mechanism | Scope |
+|----------|-----------|-------|
+| 1st (highest) | `model` argument in the tool call | Single request |
+| 2nd | `GROK_CHAT_MODEL` / `GROK_IMAGE_MODEL` env vars | Server lifetime |
+| 3rd (default) | Built-in defaults (see below) | Fallback |
+
+### Built-in defaults
+
+| Purpose | Default model |
+|---------|---------------|
+| Chat | `grok-3-fast` |
+| Image generation | `grok-2-image` |
+
+### Change defaults via environment variable
+
+```bash
+claude mcp add grok \
+  -e XAI_API_KEY=your_api_key_here \
+  -e GROK_CHAT_MODEL=grok-3 \
+  -e GROK_IMAGE_MODEL=grok-2-image \
+  -- grok-mcp
+```
+
+### Override per call
+
+Just tell Claude which model to use:
+
+```
+> ask grok to explain quantum computing using model grok-3
+```
+
+Or use `list_models` first to discover what's available, then pick one.
 
 ## File write safety
 
@@ -101,21 +153,14 @@ claude mcp add grok \
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `XAI_API_KEY` | *(required)* | Your xAI API key |
+| `GROK_CHAT_MODEL` | `grok-3-fast` | Default model for `ask_grok` |
+| `GROK_IMAGE_MODEL` | `grok-2-image` | Default model for `generate_image` |
 | `SAFE_WRITE_BASE_DIR` | `process.cwd()` | Base directory for image writes |
 | `XAI_REQUEST_TIMEOUT_MS` | `30000` | Timeout per xAI API request in milliseconds |
 | `XAI_MAX_RETRIES` | `2` | Number of retries for transient errors (429/5xx/network/timeout) |
 | `XAI_RETRY_BASE_DELAY_MS` | `500` | Base delay for exponential retry backoff |
 | `LOG_REQUESTS` | `false` | Logs tool/xAI request metadata to stderr |
 | `LOG_REQUEST_PAYLOADS` | `false` | Includes full request payloads in logs (use carefully) |
-
-The server uses these xAI models by default:
-
-| Purpose | Model |
-|---------|-------|
-| Chat | `grok-3-fast` |
-| Image generation | `grok-imagine-image` |
-
-To change models, edit the constants at the top of `grok-mcp.mjs`.
 
 ## Request logging
 

@@ -1,6 +1,6 @@
 {
   "name": "askgrokmcp",
-  "version": "1.2.0.0",
+  "version": "1.3.0",
   "description": "MCP server that exposes xAI's Grok API as tools for Claude Code",
   "license": "MIT",
   "author": "Marcelo Ceccon",

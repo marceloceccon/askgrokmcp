@@ -13,7 +13,8 @@
  * Model selection (highest priority wins):
  *   1. Per-call `model` argument
  *   2. GROK_CHAT_MODEL / GROK_IMAGE_MODEL environment variables
- *   3. Built-in defaults (grok-3-fast / grok-2-image)
+ *   3. Frontier defaults (grok-4.20-0309-reasoning / grok-imagine-image-pro)
+ *   4. Fallback defaults (grok-3-fast / grok-2-image)
  *
  * @see https://modelcontextprotocol.io
  * @see https://docs.x.ai/api
@@ -32,14 +33,22 @@ import {
 
 const XAI_API_BASE = "https://api.x.ai/v1";
 
-/** Default models — overridable via env vars or per-call argument. */
-const DEFAULT_CHAT_MODEL  = "grok-3-fast";
-const DEFAULT_IMAGE_MODEL = "grok-2-image";
+/** Frontier models — used when available and no env override is set. */
+const FRONTIER_CHAT_MODEL  = "grok-4.20-0309-reasoning";
+const FRONTIER_IMAGE_MODEL = "grok-imagine-image-pro";
 
-/** Active defaults (env vars take precedence over built-ins). */
-const CHAT_MODEL  = process.env.GROK_CHAT_MODEL  ?? DEFAULT_CHAT_MODEL;
-const IMAGE_MODEL = process.env.GROK_IMAGE_MODEL ?? DEFAULT_IMAGE_MODEL;
+/** Fallback models — used when frontier models are not available. */
+const FALLBACK_CHAT_MODEL  = "grok-3-fast";
+const FALLBACK_IMAGE_MODEL = "grok-2-image";
 
+/**
+ * Active defaults. Env vars take top priority; otherwise resolved at startup
+ * by probing the xAI /models endpoint (frontier → fallback).
+ */
+let CHAT_MODEL  = process.env.GROK_CHAT_MODEL  ?? FRONTIER_CHAT_MODEL;
+let IMAGE_MODEL = process.env.GROK_IMAGE_MODEL ?? FRONTIER_IMAGE_MODEL;
+
+const MAX_PROMPT_LENGTH     = 128_000;
 const MAX_IMAGE_VARIATIONS  = 10;
 const REQUEST_TIMEOUT_MS    = parsePositiveIntEnv("XAI_REQUEST_TIMEOUT_MS",  30_000);
 const MAX_RETRIES           = parseNonNegativeIntEnv("XAI_MAX_RETRIES",          2);
@@ -56,7 +65,8 @@ if (SAFE_WRITE_BASE_DIR && !isAbsolute(SAFE_WRITE_BASE_DIR)) {
 const WRITE_BASE_DIR = SAFE_WRITE_BASE_DIR ? resolve(SAFE_WRITE_BASE_DIR) : process.cwd();
 
 const API_KEY = process.env.XAI_API_KEY;
-if (!API_KEY) {
+const __testing = process.env.NODE_TEST === "1";
+if (!API_KEY && !__testing) {
   console.error("Missing XAI_API_KEY environment variable");
   process.exit(1);
 }
@@ -69,8 +79,8 @@ const tools = [
     description:
       "Ask Grok a question and get a response. " +
       `Default model: ${CHAT_MODEL}. ` +
-      "Use the optional 'model' parameter to use a different chat model. " +
-      "Run list_models to see all available options.",
+      "Supports system prompts and sampling parameters (temperature, max_tokens, top_p). " +
+      "Run list_models to see all available model options.",
     inputSchema: {
       type: "object",
       properties: {
@@ -78,11 +88,31 @@ const tools = [
           type: "string",
           description: "The question or prompt to send to Grok",
         },
+        system_prompt: {
+          type: "string",
+          description:
+            "Optional system prompt to set Grok's behavior and persona for this request.",
+        },
         model: {
           type: "string",
           description:
             `Chat model to use for this request. Defaults to "${CHAT_MODEL}". ` +
             "Use list_models to see available chat models.",
+        },
+        temperature: {
+          type: "number",
+          description:
+            "Sampling temperature (0-2). Lower values make output more deterministic. Default: model-dependent.",
+        },
+        max_tokens: {
+          type: "number",
+          description:
+            "Maximum number of tokens to generate in the response.",
+        },
+        top_p: {
+          type: "number",
+          description:
+            "Nucleus sampling: only consider tokens with cumulative probability up to this value (0-1).",
         },
       },
       required: ["prompt"],
@@ -313,17 +343,49 @@ async function xaiRequest(method, endpoint, body) {
 
 /**
  * Downloads a remote URL and returns its contents as a Buffer.
+ * Uses the same timeout and retry strategy as xaiRequest().
  *
  * @param {string} url - The URL to download.
  * @returns {Promise<Buffer>} The downloaded file contents.
- * @throws {Error} On non-2xx responses.
+ * @throws {Error} On non-2xx responses after retries.
  */
 async function downloadBuffer(url) {
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`Failed to download image: HTTP ${res.status}`);
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+
+      if (!res.ok) {
+        const retriable = isRetriableStatus(res.status);
+        if (retriable && attempt < MAX_RETRIES) {
+          await wait(backoffDelay(attempt));
+          continue;
+        }
+        throw new Error(`Failed to download image: HTTP ${res.status}`);
+      }
+
+      return Buffer.from(await res.arrayBuffer());
+    } catch (error) {
+      const isTimeout = error?.name === "AbortError";
+      const retriable = isTimeout || isNetworkError(error);
+
+      if (retriable && attempt < MAX_RETRIES) {
+        await wait(backoffDelay(attempt));
+        continue;
+      }
+
+      if (isTimeout) {
+        throw new Error(`Image download timed out after ${REQUEST_TIMEOUT_MS}ms`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
   }
-  return Buffer.from(await res.arrayBuffer());
+
+  throw new Error("Image download failed after retries");
 }
 
 /**
@@ -358,15 +420,28 @@ async function handleAskGrok(args) {
   if (!args || typeof args.prompt !== "string" || !args.prompt.trim()) {
     throw new Error("Invalid arguments: 'prompt' must be a non-empty string");
   }
+  if (args.prompt.length > MAX_PROMPT_LENGTH) {
+    throw new Error(
+      `Prompt too long: ${args.prompt.length} chars exceeds the ${MAX_PROMPT_LENGTH} char limit`,
+    );
+  }
 
   const model = (typeof args.model === "string" && args.model.trim())
     ? args.model.trim()
     : CHAT_MODEL;
 
-  const data = await xaiPost("/chat/completions", {
-    model,
-    messages: [{ role: "user", content: args.prompt }],
-  });
+  const messages = [];
+  if (typeof args.system_prompt === "string" && args.system_prompt.trim()) {
+    messages.push({ role: "system", content: args.system_prompt });
+  }
+  messages.push({ role: "user", content: args.prompt });
+
+  const requestBody = { model, messages };
+  if (typeof args.temperature === "number") requestBody.temperature = args.temperature;
+  if (typeof args.max_tokens === "number")  requestBody.max_tokens  = args.max_tokens;
+  if (typeof args.top_p === "number")       requestBody.top_p       = args.top_p;
+
+  const data = await xaiPost("/chat/completions", requestBody);
 
   const messageContent = data?.choices?.[0]?.message?.content;
   const text =
@@ -385,6 +460,11 @@ async function handleAskGrok(args) {
 async function handleGenerateImage(args) {
   if (!args || typeof args.prompt !== "string" || !args.prompt.trim()) {
     throw new Error("Invalid arguments: 'prompt' must be a non-empty string");
+  }
+  if (args.prompt.length > MAX_PROMPT_LENGTH) {
+    throw new Error(
+      `Prompt too long: ${args.prompt.length} chars exceeds the ${MAX_PROMPT_LENGTH} char limit`,
+    );
   }
   if (typeof args.file_path !== "string" || !args.file_path.trim()) {
     throw new Error("Invalid arguments: 'file_path' must be a non-empty string");
@@ -508,54 +588,142 @@ const toolHandlers = {
   list_models:    handleListModels,
 };
 
+// -- Model resolution --------------------------------------------------------
+
+/**
+ * Resolves CHAT_MODEL and IMAGE_MODEL at startup.
+ * If the user supplied env vars, those are trusted as-is.
+ * Otherwise, we probe the xAI /models endpoint: use frontier if available,
+ * fall back to the safe defaults if not.
+ */
+async function resolveDefaults() {
+  const chatFromEnv  = !!process.env.GROK_CHAT_MODEL;
+  const imageFromEnv = !!process.env.GROK_IMAGE_MODEL;
+
+  // Nothing to resolve if both were explicitly set.
+  if (chatFromEnv && imageFromEnv) return;
+
+  let availableIds;
+  try {
+    const data = await xaiGet("/models");
+    const models = Array.isArray(data?.data) ? data.data : [];
+    availableIds = new Set(models.map((m) => m.id));
+  } catch {
+    // If the models endpoint is unreachable, fall back to safe defaults.
+    logEvent("resolve_defaults", { status: "models_fetch_failed", action: "using_fallbacks" });
+    if (!chatFromEnv)  CHAT_MODEL  = FALLBACK_CHAT_MODEL;
+    if (!imageFromEnv) IMAGE_MODEL = FALLBACK_IMAGE_MODEL;
+    return;
+  }
+
+  if (!chatFromEnv) {
+    if (availableIds.has(FRONTIER_CHAT_MODEL)) {
+      CHAT_MODEL = FRONTIER_CHAT_MODEL;
+    } else {
+      CHAT_MODEL = FALLBACK_CHAT_MODEL;
+      logEvent("resolve_defaults", {
+        model_type: "chat",
+        wanted: FRONTIER_CHAT_MODEL,
+        resolved: FALLBACK_CHAT_MODEL,
+        reason: "frontier_unavailable",
+      });
+    }
+  }
+
+  if (!imageFromEnv) {
+    if (availableIds.has(FRONTIER_IMAGE_MODEL)) {
+      IMAGE_MODEL = FRONTIER_IMAGE_MODEL;
+    } else {
+      IMAGE_MODEL = FALLBACK_IMAGE_MODEL;
+      logEvent("resolve_defaults", {
+        model_type: "image",
+        wanted: FRONTIER_IMAGE_MODEL,
+        resolved: FALLBACK_IMAGE_MODEL,
+        reason: "frontier_unavailable",
+      });
+    }
+  }
+
+  logEvent("resolve_defaults", {
+    status: "ok",
+    chat_model: CHAT_MODEL,
+    image_model: IMAGE_MODEL,
+    chat_source: chatFromEnv ? "env" : (CHAT_MODEL === FRONTIER_CHAT_MODEL ? "frontier" : "fallback"),
+    image_source: imageFromEnv ? "env" : (IMAGE_MODEL === FRONTIER_IMAGE_MODEL ? "frontier" : "fallback"),
+  });
+}
+
 // -- Server setup ------------------------------------------------------------
 
-const server = new Server(
-  { name: "grok", version: SERVER_VERSION },
-  { capabilities: { tools: {} } },
-);
+if (!__testing) {
+  const server = new Server(
+    { name: "grok", version: SERVER_VERSION },
+    { capabilities: { tools: {} } },
+  );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name } = request.params;
-  const args = request.params.arguments ?? {};
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name } = request.params;
+    const args = request.params.arguments ?? {};
 
-  const startedAt = Date.now();
-  if (LOG_REQUESTS) {
-    logEvent("tool_request", {
-      tool: name,
-      arguments: LOG_REQUEST_PAYLOADS ? args : summarizeArguments(args),
-    });
-  }
-
-  const handler = toolHandlers[name];
-  if (!handler) {
-    throw new Error(`Unknown tool: ${name}`);
-  }
-  try {
-    const result = await handler(args);
+    const startedAt = Date.now();
     if (LOG_REQUESTS) {
-      logEvent("tool_success", {
+      logEvent("tool_request", {
         tool: name,
-        duration_ms: Date.now() - startedAt,
+        arguments: LOG_REQUEST_PAYLOADS ? args : summarizeArguments(args),
       });
     }
-    return result;
-  } catch (error) {
-    if (LOG_REQUESTS) {
-      logEvent("tool_error", {
-        tool: name,
-        duration_ms: Date.now() - startedAt,
-        error: String(error),
-      });
-    }
-    throw error;
-  }
-});
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+    const handler = toolHandlers[name];
+    if (!handler) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: `Unknown tool: ${name}. Available tools: ${Object.keys(toolHandlers).join(", ")}` }],
+      };
+    }
+    try {
+      const result = await handler(args);
+      if (LOG_REQUESTS) {
+        logEvent("tool_success", {
+          tool: name,
+          duration_ms: Date.now() - startedAt,
+        });
+      }
+      return result;
+    } catch (error) {
+      if (LOG_REQUESTS) {
+        logEvent("tool_error", {
+          tool: name,
+          duration_ms: Date.now() - startedAt,
+          error: String(error),
+        });
+      }
+      return {
+        isError: true,
+        content: [{ type: "text", text: error?.message ?? String(error) }],
+      };
+    }
+  });
+
+  await resolveDefaults();
+
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+// -- Exports (testing) -------------------------------------------------------
+
+export {
+  safeWrite,
+  buildFilePath,
+  handleAskGrok,
+  handleGenerateImage,
+  handleListModels,
+  toolHandlers,
+  WRITE_BASE_DIR,
+  MAX_PROMPT_LENGTH,
+};
 
 // -- Utility functions -------------------------------------------------------
 

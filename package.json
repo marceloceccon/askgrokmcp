@@ -24,7 +24,8 @@
   ],
   "scripts": {
     "start": "node grok-mcp.mjs",
-    "check": "node --check grok-mcp.mjs"
+    "check": "node --check grok-mcp.mjs",
+    "test": "NODE_TEST=1 node --test grok-mcp.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.27.1"

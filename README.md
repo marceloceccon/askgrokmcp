@@ -8,7 +8,7 @@ Ask Grok questions, generate images with Aurora, and explore available models â€
 
 | Tool | Description |
 |------|-------------|
-| `ask_grok` | Send a prompt to Grok and get a text response |
+| `ask_grok` | Send a prompt to Grok with optional system prompt and sampling parameters |
 | `generate_image` | Generate images using Grok's Aurora model and save them locally |
 | `list_models` | List all xAI models available to your account |
 
@@ -62,6 +62,18 @@ Once registered, you can use the tools naturally in Claude Code:
 > ask grok what the latest news in AI are
 ```
 
+### Use a system prompt
+
+```
+> ask grok to review this code, using a system prompt that says "You are a senior security auditor"
+```
+
+### Control sampling parameters
+
+```
+> ask grok to generate test data with temperature 0 and max_tokens 500
+```
+
 ### Use a specific model for one call
 
 ```
@@ -102,10 +114,14 @@ The server uses a three-level priority system for model selection:
 
 ### Built-in defaults
 
-| Purpose | Default model |
-|---------|---------------|
-| Chat | `grok-3-fast` |
-| Image generation | `grok-2-image` |
+At startup the server probes the xAI `/models` endpoint and selects the best available model:
+
+| Purpose | Frontier (preferred) | Fallback |
+|---------|---------------------|----------|
+| Chat | `grok-4.20-0309-reasoning` | `grok-3-fast` |
+| Image generation | `grok-imagine-image-pro` | `grok-2-image` |
+
+If the frontier model is not available on your account, the server automatically falls back to the safe default.
 
 ### Change defaults via environment variable
 
@@ -156,6 +172,7 @@ claude mcp add grok \
 | `GROK_CHAT_MODEL` | `grok-3-fast` | Default model for `ask_grok` |
 | `GROK_IMAGE_MODEL` | `grok-2-image` | Default model for `generate_image` |
 | `SAFE_WRITE_BASE_DIR` | `process.cwd()` | Base directory for image writes |
+| `MAX_PROMPT_LENGTH` | `128000` | Maximum prompt length in characters (fail-fast guard) |
 | `XAI_REQUEST_TIMEOUT_MS` | `30000` | Timeout per xAI API request in milliseconds |
 | `XAI_MAX_RETRIES` | `2` | Number of retries for transient errors (429/5xx/network/timeout) |
 | `XAI_RETRY_BASE_DELAY_MS` | `500` | Base delay for exponential retry backoff |

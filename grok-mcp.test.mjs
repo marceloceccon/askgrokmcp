@@ -13,6 +13,7 @@ const {
   handleAskGrok,
   handleGenerateImage,
   handleListModels,
+  handleGrokConsensus,
   toolHandlers,
   WRITE_BASE_DIR,
   MAX_PROMPT_LENGTH,
@@ -180,6 +181,42 @@ describe("handleListModels input validation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// handleGrokConsensus — input validation
+// ---------------------------------------------------------------------------
+
+describe("handleGrokConsensus input validation", () => {
+  it("rejects missing topic", async () => {
+    await assert.rejects(() => handleGrokConsensus({}), {
+      message: /topic.*must be a non-empty string/,
+    });
+  });
+
+  it("rejects empty topic", async () => {
+    await assert.rejects(() => handleGrokConsensus({ topic: "   " }), {
+      message: /topic.*must be a non-empty string/,
+    });
+  });
+
+  it("rejects invalid rounds value", async () => {
+    await assert.rejects(() => handleGrokConsensus({ topic: "test", rounds: 0 }), {
+      message: /rounds.*must be an integer/,
+    });
+  });
+
+  it("rejects rounds exceeding maximum", async () => {
+    await assert.rejects(() => handleGrokConsensus({ topic: "test", rounds: 11 }), {
+      message: /rounds.*must be an integer/,
+    });
+  });
+
+  it("rejects non-integer rounds", async () => {
+    await assert.rejects(() => handleGrokConsensus({ topic: "test", rounds: 2.5 }), {
+      message: /rounds.*must be an integer/,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // toolHandlers — routing
 // ---------------------------------------------------------------------------
 
@@ -196,8 +233,12 @@ describe("toolHandlers", () => {
     assert.equal(typeof toolHandlers.list_models, "function");
   });
 
-  it("has exactly 3 handlers", () => {
-    assert.equal(Object.keys(toolHandlers).length, 3);
+  it("maps grok_consensus to a function", () => {
+    assert.equal(typeof toolHandlers.grok_consensus, "function");
+  });
+
+  it("has exactly 4 handlers", () => {
+    assert.equal(Object.keys(toolHandlers).length, 4);
   });
 });
 

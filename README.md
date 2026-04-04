@@ -1,8 +1,14 @@
 # Grok MCP Server
 
+[![npm version](https://img.shields.io/npm/v/askgrokmcp)](https://www.npmjs.com/package/askgrokmcp)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that brings xAI's Grok API into [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as native tools.
 
-Ask Grok questions, generate images with Aurora, and explore available models — directly from your terminal.
+Ask Grok questions, generate images with Aurora, run multi-round consensus analysis, and explore available models — directly from your terminal.
+
+---
 
 ## Tools
 
@@ -11,12 +17,31 @@ Ask Grok questions, generate images with Aurora, and explore available models �
 | `ask_grok` | Send a prompt to Grok with optional system prompt and sampling parameters |
 | `generate_image` | Generate images using Grok's Aurora model and save them locally |
 | `list_models` | List all xAI models available to your account |
+| `grok_consensus` | Run a full Consensus Validation Protocol (CVP) for deep, multi-round analysis |
+
+## Built-in Protocols
+
+### Consensus Validation Protocol (CVP)
+
+The `grok_consensus` tool implements a structured, multi-round analysis protocol. Instead of a single prompt-and-response, it runs 3-10 iterative rounds where Grok progressively deepens its analysis — challenging its own assumptions, evaluating evidence strength, and synthesizing a balanced conclusion.
+
+```
+> Run CVP on whether large language models can reason
+> Ask Grok to validate the claim that sleep deprivation affects decision-making — use 5 rounds
+> Consensus check with Grok on the future of nuclear energy
+```
+
+The entire protocol executes server-side in a single tool call. Each round builds on the full conversation history for genuine iterative refinement.
+
+**Default:** 3 rounds | **Max:** 10 rounds | [Full protocol documentation](protocols/consensus-validation.md)
+
+---
 
 ## Prerequisites
 
 - **Node.js** >= 18
 - **Claude Code** CLI installed
-- **xAI API key** -- get one at [console.x.ai](https://console.x.ai)
+- **xAI API key** — get one at [console.x.ai](https://console.x.ai)
 
 ## Setup
 
@@ -50,7 +75,7 @@ Replace `/path/to/askgrokmcp` with the actual path where you cloned the reposito
 
 ---
 
-Replace `your_api_key_here` with your xAI API key in either option. That's it -- the tools are now available in Claude Code.
+Replace `your_api_key_here` with your xAI API key in either option. That's it — the tools are now available in Claude Code.
 
 ## Usage
 
@@ -93,6 +118,13 @@ Once registered, you can use the tools naturally in Claude Code:
 ```
 
 When generating multiple images, files are automatically numbered (e.g., `logo-1.png`, `logo-2.png`, ...).
+
+### Run a consensus analysis
+
+```
+> run CVP on the effectiveness of carbon capture technology
+> ask grok to validate whether quantum computers will break RSA by 2030 — use 5 rounds
+```
 
 ### List available models
 
@@ -169,10 +201,9 @@ claude mcp add grok \
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `XAI_API_KEY` | *(required)* | Your xAI API key |
-| `GROK_CHAT_MODEL` | `grok-3-fast` | Default model for `ask_grok` |
+| `GROK_CHAT_MODEL` | `grok-3-fast` | Default model for `ask_grok` and `grok_consensus` |
 | `GROK_IMAGE_MODEL` | `grok-2-image` | Default model for `generate_image` |
 | `SAFE_WRITE_BASE_DIR` | `process.cwd()` | Base directory for image writes |
-| `MAX_PROMPT_LENGTH` | `128000` | Maximum prompt length in characters (fail-fast guard) |
 | `XAI_REQUEST_TIMEOUT_MS` | `30000` | Timeout per xAI API request in milliseconds |
 | `XAI_MAX_RETRIES` | `2` | Number of retries for transient errors (429/5xx/network/timeout) |
 | `XAI_RETRY_BASE_DELAY_MS` | `500` | Base delay for exponential retry backoff |
@@ -198,6 +229,17 @@ export LOG_REQUEST_PAYLOADS=true
 
 > **Important:** Logs are written to stderr (not stdout) so MCP protocol communication remains safe.
 
+## Project Structure
+
+```
+askgrokmcp/
+  grok-mcp.mjs          Server entry point, config, HTTP client
+  src/tools.js           Tool definitions and handler implementations
+  protocols/             Protocol documentation
+    consensus-validation.md
+  grok-mcp.test.mjs     Test suite
+```
+
 ## How it works
 
 This server implements the MCP protocol over stdio. When Claude Code starts, it launches the server as a subprocess and communicates with it via JSON-RPC over stdin/stdout. The server translates MCP tool calls into xAI API requests and returns the results.
@@ -206,6 +248,22 @@ This server implements the MCP protocol over stdio. When Claude Code starts, it 
 flowchart LR
     A[Claude Code] -- stdio --> B[grok-mcp.mjs]
     B -- HTTPS --> C[xAI API]
+```
+
+For the `grok_consensus` tool, the server manages a multi-round conversation loop with Grok internally, returning the complete analysis in a single response:
+
+```mermaid
+sequenceDiagram
+    participant C as Claude Code
+    participant S as grok-mcp
+    participant G as xAI API
+
+    C->>S: grok_consensus(topic, rounds)
+    loop Each round
+        S->>G: chat/completions (with full history)
+        G-->>S: Round analysis
+    end
+    S-->>C: Structured CVP results
 ```
 
 ## License
